@@ -1,0 +1,480 @@
+*========================================
+* THESIS REPLICATION DO-FILE
+* Author: Kovas Kastanauskas (683786)
+* Erasmus University Rotterdam
+* Thesis: Geopolitical Risk and Cross-Sectional Stock Returns
+* Last updated: June 2026
+*========================================
+* REQUIRED PACKAGES: asreg, winsor2, estout
+* Install with: ssc install asreg, replace
+*              ssc install winsor2, replace
+*              ssc install estout, replace
+*
+* REQUIRED DATA FILES (place in working directory):
+*   WRDS_data_set.dta
+*   compustat_fundamentals_until_2020_12.dta
+*   compustat_historical_until_2020_12.dta
+*   COMPUSTAT_CRSP_LINKING_TABLE_dta.dta
+*   data_gpr_export_stata.dta
+*   FamaFrench3factor_Research_Data_Factors.csv
+*   F-F_Momentum_Factor.csv
+*========================================
+
+cd "/Users/kovaskastanauskas/Desktop/thesis/data sets"
+
+*========================================
+* STEP 1: Prepare Factor Data
+*========================================
+
+*--- Fama-French Three Factors ---
+* Skip first 4 header rows, parse date as YYYYMM integer
+import delimited "FamaFrench3factor_Research_Data_Factors.csv", delimiters(",") rowrange(5:) clear
+rename v1 date
+rename v2 mktrf
+rename v3 smb
+rename v4 hml
+rename v5 rf
+destring date mktrf smb hml rf, replace force
+drop if date == .
+drop if date > 201912 | date < 198501
+gen year     = floor(date / 100)
+gen month_num = date - year * 100
+gen month    = ym(year, month_num)
+format month %tm
+drop year month_num date
+replace mktrf = mktrf / 100
+replace smb   = smb   / 100
+replace hml   = hml   / 100
+replace rf    = rf    / 100
+save "ff3_clean.dta", replace
+
+*--- Carhart Momentum Factor ---
+import delimited "F-F_Momentum_Factor.csv", delimiters(",") rowrange(14:) clear
+rename v1 date
+rename v2 mom
+destring date mom, replace force
+drop if date == .
+drop if date > 201912 | date < 198501
+gen year      = floor(date / 100)
+gen month_num  = date - year * 100
+gen month     = ym(year, month_num)
+format month %tm
+drop year month_num date
+replace mom = mom / 100
+save "mom_clean.dta", replace
+
+*--- GPR Index (Caldara & Iacoviello 2022) ---
+use "data_gpr_export_stata.dta", clear
+keep month GPR GPRT GPRA
+keep if month >= monthly("1985m1","YM") & month <= monthly("2019m12","YM")
+drop if GPR == .
+save "gpr_clean.dta", replace
+
+*========================================
+* STEP 2: Prepare Linking and Accounting Data
+*========================================
+
+*--- CRSP-Compustat Linking Table ---
+use "COMPUSTAT_CRSP_LINKING_TABLE_dta.dta", clear
+rename LINKPRIM linkprim
+rename LIID liid
+rename LINKTYPE linktype
+rename LPERMNO lpermno
+rename LPERMCO lpermco
+rename LINKDT linkdt
+rename LINKENDDT linkenddt
+keep if linktype == "LU" | linktype == "LC"
+keep if linkprim == "P"  | linkprim == "C"
+save "linktable_clean.dta", replace
+
+rename lpermno permno
+gsort permno -linktype -linkdt
+bysort permno: keep if _n == 1
+save "linktable_temp.dta", replace
+
+*--- Compustat Fundamentals ---
+use "compustat_fundamentals_until_2020_12.dta", clear
+keep gvkey fyear at sale revt sich csho prcc_f fic
+keep if fic == "USA"
+bysort gvkey fyear: keep if _n == 1
+save "fundamentals_clean.dta", replace
+
+*--- Compustat Geographic Segments (International Revenue) ---
+use "compustat_historical_until_2020_12.dta", clear
+keep if stype == "GEOSEG"
+keep gvkey datadate snms sales
+gen fyear = year(datadate)
+gen domestic = 0
+replace domestic = 1 if regexm(upper(snms), "UNITED STATES|DOMESTIC|U\.S\.|USA|NORTH AMERICA")
+bysort gvkey fyear: egen total_seg_sales  = total(sales)
+bysort gvkey fyear: egen domestic_sales   = total(sales * domestic)
+gen foreign_sales  = total_seg_sales - domestic_sales
+gen intl_rev_share = foreign_sales / total_seg_sales
+replace intl_rev_share = 0 if intl_rev_share < 0
+replace intl_rev_share = . if total_seg_sales == 0
+bysort gvkey fyear: keep if _n == 1
+keep gvkey fyear intl_rev_share total_seg_sales foreign_sales
+save "segments_clean.dta", replace
+
+*========================================
+* STEP 3: Build Master Panel
+*========================================
+
+*--- Base: CRSP Monthly Returns ---
+use "WRDS_data_set.dta", clear
+rename PERMNO permno
+rename PERMCO permco
+rename SICCD  siccd
+rename MthCalDt mthcaldt
+rename MthRet   mthret
+rename ShrOut   shrout
+gen month = mofd(mthcaldt)
+format month %tm
+gen fyear = year(mthcaldt)
+
+*--- Merge: Linking Table ---
+sort permno
+merge m:1 permno using "linktable_temp.dta", keepusing(gvkey linkdt linkenddt linktype) keep(master match)
+drop if mthcaldt < linkdt
+drop if linkenddt != . & mthcaldt > linkenddt
+drop _merge
+bysort permno mthcaldt: keep if _n == 1
+
+*--- Merge: Compustat Fundamentals ---
+sort gvkey fyear
+merge m:1 gvkey fyear using "fundamentals_clean.dta", keep(master match)
+drop _merge
+
+*--- Merge: Geographic Segments ---
+sort gvkey fyear
+merge m:1 gvkey fyear using "segments_clean.dta", keepusing(intl_rev_share foreign_sales total_seg_sales) keep(master match)
+drop _merge
+
+*--- Merge: GPR Index ---
+sort month
+merge m:1 month using "gpr_clean.dta", keep(master match)
+drop _merge
+
+*--- Merge: Fama-French Factors ---
+sort month
+merge m:1 month using "ff3_clean.dta", keep(master match)
+drop _merge
+
+*--- Merge: Momentum Factor ---
+sort month
+merge m:1 month using "mom_clean.dta", keep(master match)
+drop _merge
+
+save "master_panel_raw.dta", replace
+
+*========================================
+* STEP 4: Clean Sample
+*========================================
+
+use "master_panel_raw.dta", clear
+
+* Drop missing returns
+drop if mthret == .
+
+* Exclude financials (SIC 6000-6999) and utilities (SIC 4900-4999)
+* Use Compustat historical SIC where available, else CRSP SIC
+gen sic_use = sich
+replace sic_use = siccd if sich == .
+drop if sic_use >= 6000 & sic_use <= 6999
+drop if sic_use >= 4900 & sic_use <= 4999
+
+* Restrict to 1985-2019
+keep if fyear >= 1985 & fyear <= 2019
+
+* Require minimum 24 monthly observations per firm
+bysort permno: gen nobs = _N
+drop if nobs < 24
+drop nobs
+
+* Defense sector dummy (SIC-based proxy for government procurement dependence)
+* SIC codes: guided missiles (3760-3769), ordnance (3489),
+*            tanks (3795), defense electronics (3812)
+gen defense = 0
+replace defense = 1 if sic_use >= 3760 & sic_use <= 3769
+replace defense = 1 if sic_use == 3489
+replace defense = 1 if sic_use == 3795
+replace defense = 1 if sic_use == 3812
+
+* Winsorise returns at 1st/99th percentiles
+winsor2 mthret, replace cuts(1 99)
+
+* Market capitalisation (shares outstanding x fiscal year-end price)
+gen mktcap = shrout * prcc_f
+
+save "master_panel_clean.dta", replace
+
+*========================================
+* STEP 5: Estimate Firm-Level GPR Betas
+* Rolling 60-month window, minimum 24 observations
+* Controls: FF3 factors + Carhart momentum
+*========================================
+
+use "master_panel_clean.dta", clear
+
+xtset permno month
+
+* Standardise GPR index (mean 0, SD 1)
+egen GPR_std = std(GPR)
+
+* Estimate rolling betas: r_it = a + b_GPR*GPR* + b_MKT*MKTRF + b_SMB*SMB + b_HML*HML + b_MOM*MOM
+asreg mthret GPR_std mktrf smb hml mom, by(permno) fit minimum(24)
+
+rename _b_GPR_std gpr_beta
+rename _b_mktrf   beta_mkt
+rename _b_cons    alpha
+rename _R2        r2
+rename _adjR2     adjr2
+rename _Nobs      nobs_reg
+
+save "master_panel_betas.dta", replace
+
+*========================================
+* STEP 6: Estimate GPRT and GPRA Betas
+* Robustness: threat and act subindices
+*========================================
+
+use "master_panel_betas.dta", clear
+
+* Drop leftover asreg variables before new estimation
+foreach v in _b_smb _b_hml _b_mom _b_mktrf _b_cons _b_GPR_std _b_GPRT_std _b_GPRA_std _fitted _residuals _R2 _adjR2 _Nobs {
+    capture drop `v'
+}
+
+* Corrected BM and log market cap (units fix: at in millions, mktcap in thousands)
+gen bm_fixed = at / (mktcap / 1000)
+replace bm_fixed = . if bm_fixed <= 0 | bm_fixed == .
+winsor2 bm_fixed, replace cuts(1 99)
+
+gen log_mktcap_fixed = log(mktcap / 1000)
+replace log_mktcap_fixed = . if mktcap <= 0 | mktcap == .
+
+* Winsorise key variables
+winsor2 gpr_beta,      replace cuts(1 99)
+winsor2 intl_rev_share, replace cuts(1 99)
+
+* High international exposure dummy (>50% foreign revenues)
+gen high_intl = (intl_rev_share > 0.5) if intl_rev_share != .
+
+* GPRT (threat) betas
+egen GPRT_std = std(GPRT)
+asreg mthret GPRT_std mktrf smb hml mom, by(permno) fit minimum(24)
+rename _b_GPRT_std gpr_threat_beta
+foreach v in _b_smb _b_hml _b_mom _b_mktrf _b_cons _fitted _residuals _R2 _adjR2 _Nobs {
+    capture drop `v'
+}
+winsor2 gpr_threat_beta, replace cuts(1 99)
+
+* GPRA (act) betas
+egen GPRA_std = std(GPRA)
+asreg mthret GPRA_std mktrf smb hml mom, by(permno) fit minimum(24)
+rename _b_GPRA_std gpr_act_beta
+foreach v in _b_smb _b_hml _b_mom _b_mktrf _b_cons _fitted _residuals _R2 _adjR2 _Nobs {
+    capture drop `v'
+}
+winsor2 gpr_act_beta, replace cuts(1 99)
+
+save "master_panel_robustness.dta", replace
+
+*========================================
+* STEP 7: Fama-MacBeth Cross-Sectional Regressions
+* Main results (Table 3) and robustness (Table 5)
+*========================================
+
+use "master_panel_robustness.dta", clear
+
+*--- Main Models (Table 3) ---
+
+* Model 1: Base - GPR beta only
+asreg mthret gpr_beta, by(month) fmb
+estimates store model1
+
+* Model 2: Add size (log market cap) and value (book-to-market) controls
+asreg mthret gpr_beta log_mktcap_fixed bm_fixed, by(month) fmb
+estimates store model2
+
+* Model 3: Add international revenue share (H1a test)
+asreg mthret gpr_beta log_mktcap_fixed bm_fixed intl_rev_share, by(month) fmb
+estimates store model3
+
+* Model 4: Add defense dummy (H1b test)
+asreg mthret gpr_beta log_mktcap_fixed bm_fixed intl_rev_share defense, by(month) fmb
+estimates store model4
+
+* Model 5: Replace continuous intl_rev_share with binary high_intl indicator
+asreg mthret gpr_beta log_mktcap_fixed bm_fixed high_intl defense, by(month) fmb
+estimates store model5
+
+* Display Table 3
+esttab model1 model2 model3 model4 model5, b(4) se(4) star(* 0.10 ** 0.05 *** 0.01) mtitles("Base" "Controls" "+IntlRev" "+Defense" "+HighIntl") keep(gpr_beta intl_rev_share high_intl defense log_mktcap_fixed bm_fixed)
+
+* Display with t-statistics
+estimates table model1 model2 model3 model4 model5, b se t stats(N)
+
+*--- Robustness Models (Table 5) ---
+
+* Main GPR beta (benchmark)
+asreg mthret gpr_beta log_mktcap_fixed bm_fixed, by(month) fmb
+estimates store robust_main
+
+* Threat beta (GPRT)
+asreg mthret gpr_threat_beta log_mktcap_fixed bm_fixed, by(month) fmb
+estimates store robust_threat
+
+* Act beta (GPRA)
+asreg mthret gpr_act_beta log_mktcap_fixed bm_fixed, by(month) fmb
+estimates store robust_act
+
+* Display Table 5
+esttab robust_main robust_threat robust_act, b(4) se(4) star(* 0.10 ** 0.05 *** 0.01) mtitles("Main (GPR)" "Threats (GPRT)" "Acts (GPRA)") keep(gpr_beta gpr_threat_beta gpr_act_beta log_mktcap_fixed bm_fixed)
+
+save "master_panel_final.dta", replace
+
+*========================================
+* STEP 8: Descriptive Statistics (Tables 1 and 2)
+*========================================
+
+use "master_panel_final.dta", clear
+
+* Table 1: Summary statistics
+summarize mthret GPR gpr_beta intl_rev_share defense log_mktcap_fixed bm_fixed, detail
+
+* Table 2: Correlation matrix
+correlate mthret gpr_beta intl_rev_share defense log_mktcap_fixed bm_fixed
+
+* Sample composition
+bysort permno: gen tag = (_n == 1)
+count if tag == 1
+count if tag == 1 & defense == 1
+drop tag
+
+*========================================
+* STEP 9: Portfolio Sorting
+* Quintile sort (Table 4a) and tercile sort (Table 4b)
+*========================================
+
+use "master_panel_final.dta", clear
+
+*--- Quintile Sort (Table 4a) ---
+xtile gpr_q = gpr_beta, nq(5)
+tabstat mthret, by(gpr_q) stats(mean sd n) format(%9.4f)
+
+* Q5-Q1 spread significance test
+preserve
+collapse (mean) mthret, by(gpr_q month)
+reshape wide mthret, i(month) j(gpr_q)
+gen spread = mthret5 - mthret1
+ttest spread == 0
+restore
+
+* Figure 3: Quintile bar chart
+preserve
+collapse (mean) mthret, by(gpr_q)
+graph bar mthret, over(gpr_q, relabel(1 "Q1 (Low)" 2 "Q2" 3 "Q3" 4 "Q4" 5 "Q5 (High)")) title("Average Monthly Return by GPR Beta Quintile") ytitle("Mean Monthly Return") blabel(bar, format(%9.4f)) yline(0, lcolor(black) lpattern(dash))
+graph export "fig_quintile_returns.png", replace
+restore
+
+*--- Tercile Sort (Table 4b) - Primary robustness specification ---
+use "master_panel_final.dta", clear
+xtile gpr_t = gpr_beta, nq(3)
+label define t_lbl 1 "T1 (Low/Negative)" 2 "T2 (Middle)" 3 "T3 (High/Positive)"
+label values gpr_t t_lbl
+tabstat mthret, by(gpr_t) stats(mean sd n) format(%9.4f)
+
+* T3-T1 spread significance test
+preserve
+collapse (mean) mthret, by(gpr_t month)
+reshape wide mthret, i(month) j(gpr_t)
+gen spread = mthret3 - mthret1
+ttest spread == 0
+restore
+
+* Figure 4: Tercile bar chart
+preserve
+collapse (mean) mthret, by(gpr_t)
+graph bar mthret, over(gpr_t) title("Average Monthly Return by GPR Beta Tercile") ytitle("Mean Monthly Return") blabel(bar, format(%9.4f)) yline(0, lcolor(black) lpattern(dash))
+graph export "fig_tercile_returns.png", replace
+restore
+
+*========================================
+* STEP 10: Double-Sort Analysis (Table 6)
+* GPR beta quintiles x international revenue terciles
+*========================================
+
+use "master_panel_final.dta", clear
+
+xtile gpr_q  = gpr_beta,       nq(5)
+xtile intl_q = intl_rev_share if intl_rev_share != ., nq(3)
+
+* Within each GPR quintile, test if higher intl revenue earns higher returns
+forvalues q = 1/5 {
+    ttest mthret if (gpr_q == `q') & (intl_q == 1 | intl_q == 2), by(intl_q)
+}
+
+*========================================
+* STEP 11: GPR Beta Stability (Table A1, Appendix B)
+* Four specifications with progressively richer controls
+*========================================
+
+use "master_panel_final.dta", clear
+capture drop gpr_beta_raw gpr_beta_mkt gpr_beta_ff3
+
+* Beta 1: GPR index only
+asreg mthret GPR_std, by(permno) fit minimum(24)
+rename _b_GPR_std gpr_beta_raw
+foreach v in _b_cons _fitted _residuals _R2 _adjR2 _Nobs { capture drop `v' }
+
+* Beta 2: GPR + market factor
+asreg mthret GPR_std mktrf, by(permno) fit minimum(24)
+rename _b_GPR_std gpr_beta_mkt
+foreach v in _b_cons _b_mktrf _fitted _residuals _R2 _adjR2 _Nobs { capture drop `v' }
+
+* Beta 3: GPR + FF3 (market + SMB + HML)
+asreg mthret GPR_std mktrf smb hml, by(permno) fit minimum(24)
+rename _b_GPR_std gpr_beta_ff3
+foreach v in _b_cons _b_mktrf _b_smb _b_hml _fitted _residuals _R2 _adjR2 _Nobs { capture drop `v' }
+
+* Beta 4: Main specification (gpr_beta, already in dataset)
+* Cross-specification correlation matrix
+summarize gpr_beta_raw gpr_beta_mkt gpr_beta_ff3 gpr_beta
+correlate  gpr_beta_raw gpr_beta_mkt gpr_beta_ff3 gpr_beta
+
+*========================================
+* STEP 12: Figures
+*========================================
+
+use "master_panel_final.dta", clear
+
+* Figure 1: GPR Index over time (1985-2019)
+preserve
+collapse (mean) GPR, by(month)
+tsset month
+tsline GPR, title("GPR Index Over Time (1985-2019)") ytitle("GPR Index") xtitle("Month")
+graph export "gpr_time.png", replace
+restore
+
+* Figure 2: Distribution of GPR betas (post-winsorisation)
+histogram gpr_beta, bin(100) normal title("GPR Beta Distribution") xtitle("GPR Beta") ytitle("Density")
+graph export "fig_gpr_beta_clean.png", replace
+
+* Figure 5: Average GPR beta across firms by year
+preserve
+gen year = year(dofm(month))
+collapse (mean) gpr_beta, by(year)
+twoway line gpr_beta year, title("Average GPR Beta Across Firms by Year") ytitle("Mean GPR Beta") xtitle("Year") yline(0, lcolor(black) lpattern(dash))
+graph export "fig_gpr_beta_time.png", replace
+restore
+
+* Figure 6: International revenue share vs GPR beta (5% random sample)
+preserve
+keep if intl_rev_share != . & gpr_beta != .
+sample 5
+twoway scatter gpr_beta intl_rev_share, msize(tiny) mcolor(navy) title("International Revenue Share vs GPR Beta") ytitle("GPR Beta") xtitle("International Revenue Share") yline(0, lcolor(black) lpattern(dash))
+graph export "fig_intl_scatter.png", replace
+restore
+
+di "=== REPLICATION COMPLETE ==="
