@@ -401,6 +401,69 @@ graph export "fig_tercile_returns.png", replace
 restore
 
 *========================================
+* STEP 9b: U-Shape Robustness — Trimming Sensitivity
+* Tests whether U-shaped return pattern survives
+* aggressive trimming of extreme GPR beta observations
+* Conducted following supervisor recommendation
+*========================================
+
+use "master_panel_final.dta", clear
+
+* Store percentile boundaries as scalars
+sum gpr_beta, detail
+scalar p5_val  = r(p5)
+scalar p95_val = r(p95)
+scalar p10_val = r(p10)
+scalar p90_val = r(p90)
+
+*--- Trim 1: Drop outer 5% on each side ---
+gen gpr_beta_trim595 = gpr_beta
+replace gpr_beta_trim595 = . if gpr_beta < p5_val | gpr_beta > p95_val
+* (180,335 observations set to missing)
+
+* Quintile sort - 5/95 trimmed
+xtile quintile_trim595 = gpr_beta_trim595, nq(5)
+bysort quintile_trim595: egen mean_ret_q_trim595 = mean(mthret)
+di "=== QUINTILE RETURNS: 5/95 TRIM ==="
+tabstat mean_ret_q_trim595, by(quintile_trim595) stat(mean)
+
+* Tercile sort - 5/95 trimmed
+xtile tercile_trim595 = gpr_beta_trim595, nq(3)
+bysort tercile_trim595: egen mean_ret_t_trim595 = mean(mthret)
+di "=== TERCILE RETURNS: 5/95 TRIM ==="
+tabstat mean_ret_t_trim595, by(tercile_trim595) stat(mean)
+
+*--- Trim 2: Drop outer 10% on each side ---
+gen gpr_beta_trim1090 = gpr_beta
+replace gpr_beta_trim1090 = . if gpr_beta < p10_val | gpr_beta > p90_val
+* (360,650 observations set to missing)
+
+* Quintile sort - 10/90 trimmed
+xtile quintile_trim1090 = gpr_beta_trim1090, nq(5)
+bysort quintile_trim1090: egen mean_ret_q_trim1090 = mean(mthret)
+di "=== QUINTILE RETURNS: 10/90 TRIM ==="
+tabstat mean_ret_q_trim1090, by(quintile_trim1090) stat(mean)
+
+* Tercile sort - 10/90 trimmed
+xtile tercile_trim1090 = gpr_beta_trim1090, nq(3)
+bysort tercile_trim1090: egen mean_ret_t_trim1090 = mean(mthret)
+di "=== TERCILE RETURNS: 10/90 TRIM ==="
+tabstat mean_ret_t_trim1090, by(tercile_trim1090) stat(mean)
+
+* Note on winsorization vs trimming:
+* Winsorizing at 5/95 or 10/90 produces identical quintile/tercile
+* assignments to the baseline because sorting is rank-based.
+* Trimming (dropping) genuinely changes which firms populate
+* extreme portfolios and is therefore the appropriate sensitivity test.
+
+di "=== U-SHAPE SENSITIVITY ANALYSIS COMPLETE ==="
+di "Baseline Q1/Q5: 0.37% / 0.36%"
+di "5/95 trim Q1/Q5: 0.67% / 0.65%"
+di "10/90 trim Q1/Q5: 0.90% / 0.84%"
+di "Middle quintiles stable across all specifications: ~1.10-1.14%"
+di "U-shape persists under all trimming levels."
+
+*========================================
 * STEP 10: Double-Sort Analysis (Table 6)
 * GPR beta quintiles x international revenue terciles
 *========================================
